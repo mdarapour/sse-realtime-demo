@@ -1,0 +1,39 @@
+# .NET
+bin/
+obj/
+*.user
+*.userosscache
+*.suo
+*.cache
+*.log
+.vs/
+.vscode/
+.idea/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+build/
+
+# Environment files (in case someone adds real secrets)
+.env
+.env.local
+.env.production
+*.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Kubernetes secrets (if someone creates real ones)
+*-secret.yaml
+*-secrets.yaml
+
+# Ignore actual config files (keeping only example ones)
+# Uncomment these if you create real config files
+# backend/appsettings.json
+# k8s/backend-config.yaml
+# k8s/mongodb.yaml

@@ -1,0 +1,83 @@
+@SseDemo_HostAddress = http://localhost:5121
+@ApiKey = demo-api-key-1
+
+### Health check
+GET {{SseDemo_HostAddress}}/health
+Accept: application/json
+
+### Connect to SSE stream
+GET {{SseDemo_HostAddress}}/api/sse/connect?clientId=test-client
+X-API-Key: {{ApiKey}}
+
+### Send notification to all clients
+POST {{SseDemo_HostAddress}}/api/sse/notification
+Content-Type: application/json
+X-API-Key: {{ApiKey}}
+
+{
+  "message": "This is a test notification",
+  "severity": "info"
+}
+
+### Send alert to all clients
+POST {{SseDemo_HostAddress}}/api/sse/alert
+Content-Type: application/json
+X-API-Key: {{ApiKey}}
+
+{
+  "message": "System maintenance scheduled for midnight",
+  "severity": "high",
+  "category": "system"
+}
+
+### Send critical alert to all clients
+POST {{SseDemo_HostAddress}}/api/sse/alert
+Content-Type: application/json
+X-API-Key: {{ApiKey}}
+
+{
+  "message": "Security breach detected!",
+  "severity": "critical",
+  "category": "security"
+}
+
+### Send data update to all clients
+POST {{SseDemo_HostAddress}}/api/sse/data-update
+Content-Type: application/json
+X-API-Key: {{ApiKey}}
+
+{
+  "entityId": "user-123",
+  "entityType": "user",
+  "changes": {
+    "name": "John Doe",
+    "email": "john@example.com"
+  }
+}
+
+### Broadcast custom event to all clients
+POST {{SseDemo_HostAddress}}/api/sse/broadcast
+Content-Type: application/json
+X-API-Key: {{ApiKey}}
+
+{
+  "eventType": "heartbeat",
+  "data": "{\"timestamp\":\"2024-01-01T12:00:00Z\"}"
+}
+
+### Start automatic demo events (cycles through all event types)
+POST {{SseDemo_HostAddress}}/api/demo/start
+Content-Type: application/json
+X-API-Key: {{ApiKey}}
+
+{
+  "intervalSeconds": 3
+}
+
+### Stop automatic demo events
+POST {{SseDemo_HostAddress}}/api/demo/stop
+X-API-Key: {{ApiKey}}
+
+### Check demo status
+GET {{SseDemo_HostAddress}}/api/demo/status
+X-API-Key: {{ApiKey}}
