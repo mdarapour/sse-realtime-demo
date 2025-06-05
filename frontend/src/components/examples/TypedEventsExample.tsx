@@ -201,7 +201,7 @@ function MyComponent() {
     notifications, 
     dataUpdates 
   } = useSseTyped({
-    url: 'http://localhost:5121/api/sse/connect',
+    url: 'http://sse-demo.local/api/sse/connect',
     clientId: 'my-client-id',
     autoConnect: true,
     apiKey: 'your-api-key', // Optional

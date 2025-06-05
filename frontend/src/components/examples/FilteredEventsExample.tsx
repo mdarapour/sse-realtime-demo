@@ -252,7 +252,7 @@ export default function FilteredEventsExample({ clientId, backendUrl, apiKey }: 
 
 function FilteredComponent() {
   const { status, events } = useSse({
-    url: 'http://localhost:5121/api/sse/connect',
+    url: 'http://sse-demo.local/api/sse/connect',
     clientId: 'my-client-id',
     filter: 'notification', // Only receive notification events
     autoConnect: true,

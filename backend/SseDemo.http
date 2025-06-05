@@ -1,4 +1,4 @@
-@SseDemo_HostAddress = http://localhost:5121
+@SseDemo_HostAddress = http://sse-demo.local
 @ApiKey = demo-api-key-1
 
 ### Health check

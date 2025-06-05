@@ -101,7 +101,7 @@ export default function BasicExample({ clientId, backendUrl, apiKey }: BasicExam
 
 function MyComponent() {
   const { status, events } = useSse({
-    url: 'http://localhost:5121/api/sse/connect',
+    url: 'http://sse-demo.local/api/sse/connect',
     clientId: 'my-client-id',
     autoConnect: true,
     apiKey: 'your-api-key', // Optional

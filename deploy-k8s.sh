@@ -82,11 +82,11 @@ echo
 echo "2. Add to /etc/hosts (if not already added):"
 echo "   echo '127.0.0.1 sse-demo.local' | sudo tee -a /etc/hosts"
 echo
-echo -e "${GREEN}Alternative Access (NodePort):${NC}"
-echo "If Ingress is not available: http://localhost:30080"
-echo "(Note: Some features may not work correctly without proper Ingress setup)"
+echo -e "${RED}Important:${NC}"
+echo "This application requires Ingress for proper operation."
+echo "NodePort (30080) is only for emergency troubleshooting."
 echo
-echo -e "${YELLOW}To test SSE across pods:${NC}"
+echo -e "${YELLOW}To test SSE across pods (internal pod communication):${NC}"
 echo "kubectl exec -it deploy/backend -n sse-demo -- curl -X POST http://localhost:8080/api/sse/broadcast \\"
 echo "  -H 'Content-Type: application/json' \\"
 echo "  -H 'X-API-Key: demo-api-key-12345' \\"

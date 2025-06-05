@@ -23,21 +23,19 @@ For the complete setup guide, see the [Quick Start Guide](../docs/QUICK_START.md
 # Install dependencies
 npm install
 
-# Start development server
-npm run dev
+# Build for Kubernetes deployment
+npm run build
 ```
 
-The frontend will be available at http://localhost:5173
+> **Note**: This application requires Kubernetes deployment.  
+> There is no local development server - use the Kubernetes deployment.
 
 ### Environment Variables
 
 ```bash
-# For local development
-export VITE_API_URL=http://localhost:5121
-export VITE_API_KEY=demo-api-key-12345
-
-# For production/Kubernetes
-# These are set during the Docker build process
+# Set during Docker build for Kubernetes deployment
+# VITE_API_URL is left empty to use relative paths via Ingress
+# VITE_API_KEY is set to the demo API key
 ```
 
 ## Project Structure
