@@ -3,16 +3,7 @@
 > **⚠️ DEMO APPLICATION - NOT FOR PRODUCTION**  
 > Hardcoded credentials for easy setup. See [SECURITY.md](./SECURITY.md).
 
-Server-Sent Events (SSE) implementation with .NET 9.0, React, and Kubernetes. Demonstrates distributed real-time event streaming with MongoDB outbox pattern.
-
-## Features
-
-- **Distributed SSE** with MongoDB outbox pattern
-- **Kubernetes-native** with horizontal scaling (3-10 pods)
-- **Event filtering** at connection level
-- **Typed events** with schema validation
-- **Automatic reconnection** and deduplication
-- **API key authentication**
+Distributed Server-Sent Events implementation with .NET 9.0, React, and Kubernetes. Features MongoDB outbox pattern, clean architecture, and event ordering guarantees.
 
 ## Quick Start
 
@@ -21,109 +12,112 @@ Server-Sent Events (SSE) implementation with .NET 9.0, React, and Kubernetes. De
 echo '127.0.0.1 sse-demo.local' | sudo tee -a /etc/hosts
 
 # Deploy
-git clone https://github.com/mdarapour/sse-realtime-demo.git
-cd sse-realtime-demo
 ./deploy-k8s.sh
 
 # Access
 open http://sse-demo.local
 ```
 
-See [Quick Start Guide](docs/QUICK_START.md) for details.
-
 ## Architecture
 
-```mermaid
-graph TD
-    subgraph "Kubernetes Cluster"
-        subgraph "Frontend (2 pods)"
-            F1[nginx + React]
-            F2[nginx + React]
-        end
-        
-        subgraph "Backend (3-10 pods)"
-            B1[.NET API]
-            B2[.NET API]
-            B3[.NET API]
-        end
-        
-        subgraph "Storage"
-            M[(MongoDB)]
-        end
-        
-        I[Ingress] --> F1 & F2
-        F1 & F2 --> B1 & B2 & B3
-        B1 & B2 & B3 <--> M
-    end
-    
-    C[Browser] --> I
-```
+- **Frontend**: React SPA with TypeScript, deployed on Nginx (2 pods)
+- **Backend**: .NET 9.0 API with clean architecture (3-10 pods auto-scaling)
+- **Storage**: MongoDB with outbox pattern for distributed event delivery
+- **Infrastructure**: Kubernetes with Nginx Ingress
+
+### Key Patterns
+- Repository pattern for data access
+- Service layer for business logic
+- MongoDB outbox for cross-pod event distribution
+- Atomic sequence numbers for global event ordering
+- Client checkpoints for reliable event replay
 
 ## API Endpoints
 
-### SSE Connection
 ```bash
-GET /api/sse/connect?clientId={id}&filter={eventType}&apikey={key}
+# SSE Connection
+GET /api/sse/connect?clientId={id}&filter={eventType}&checkpoint={seq}&apikey={key}
+
+# Event Broadcasting
+POST /api/sse/broadcast          # Custom event to all clients
+POST /api/sse/send/{clientId}    # Event to specific client
+POST /api/sse/notification       # System notification
+POST /api/sse/alert             # Alert broadcast
+POST /api/sse/data-update       # Data update event
+
+# Demo Control
+POST /api/demo/start            # Start event generation
+POST /api/demo/stop             # Stop event generation
 ```
-
-### Event Broadcasting
-```bash
-POST /api/sse/broadcast
-POST /api/sse/notification
-POST /api/sse/alert
-POST /api/sse/data-update
-POST /api/sse/heartbeat
-```
-
-### Demo Control
-```bash
-POST /api/demo/start
-POST /api/demo/stop
-GET  /api/demo/status
-```
-
-## Key Components
-
-### Backend
-- `SseService.cs` - Manages connections and event distribution
-- `SseOutboxService.cs` - MongoDB outbox pattern for cross-pod events
-- `SseMessageService.cs` - Typed event creation
-- `ApiKeyAuthenticationHandler.cs` - API key validation
-
-### Frontend
-- `useSse()` - React hook for SSE connections
-- `useSseTyped()` - Typed event handling
-- `SseService.ts` - EventSource wrapper with reconnection
 
 ## Event Flow
 
-1. Client connects via Ingress → Backend pod
-2. Events published to MongoDB outbox
-3. Each pod polls outbox for new events
-4. Events delivered to local clients based on filters
+1. **Publish**: Event → Service Layer → MongoDB Outbox (with sequence number)
+2. **Distribute**: Each pod polls outbox → Delivers to local clients
+3. **Checkpoint**: Client acknowledges → Update checkpoint in MongoDB
+4. **Recovery**: On reconnect → Replay from checkpoint → Resume streaming
+
+## Testing
+
+The project includes comprehensive test coverage for distributed SSE functionality, checkpoint recovery, and event ordering guarantees.
 
 ## Examples
 
+### Frontend Usage
 ```typescript
-// Frontend - Connect with filter
 const { events, status } = useSse({
   url: '/api/sse/connect',
   filter: 'notification',
-  apiKey: 'demo-api-key-12345'
+  apiKey: 'demo-api-key-12345',
+  useCheckpoint: true
 });
+```
 
-// Backend - Send typed event
-_messageService.SendNotificationToAll(
-  "System update complete", 
-  "info"
+### Backend Service Layer
+```csharp
+await _broadcastService.BroadcastNotificationAsync(
+    "System update complete", 
+    "info"
 );
 ```
 
+### Event Format
+```json
+{
+  "_sequence": 12345,
+  "type": "notification",
+  "messageId": "uuid",
+  "timestamp": "2025-01-09T10:30:00Z",
+  "data": { "message": "Hello World" }
+}
+```
+
+## Monitoring
+
+```bash
+GET /health/live   # Kubernetes liveness probe
+GET /health/ready  # Kubernetes readiness probe
+```
+
+## Recent Improvements
+
+- **Fixed Critical Event Loss** - Redesigned outbox pattern for reliable delivery
+- **Repository Pattern** - Clean separation of data access  
+- **Service Layer** - Business logic abstraction
+- **Checkpoint Recovery** - Client-side event recovery
+
 ## Documentation
 
-- [SSE Best Practices](docs/SSE_BEST_PRACTICES.md) - Patterns and implementation guide
-- [Use Cases](docs/USE_CASES.md) - Real-world examples
+- [SSE Best Practices](docs/SSE_BEST_PRACTICES.md) - Implementation patterns
+- [Use Cases](docs/USE_CASES.md) - Real-world scenarios
 - [Quick Start](docs/QUICK_START.md) - Setup instructions
+
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Submit a pull request
 
 ## License
 

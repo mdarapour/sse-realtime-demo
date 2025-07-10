@@ -3,6 +3,8 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using SseDemo.Models;
 using SseDemo.Outbox;
+using SseDemo.Repositories;
+using SseRealTimeDemo.Models;
 
 namespace SseDemo.Services;
 
@@ -13,6 +15,7 @@ public class SseService : ISseService, IDisposable
 {
     private readonly ILogger<SseService> _logger;
     private readonly IServiceProvider _serviceProvider;
+    private readonly ICheckpointRepository? _checkpointRepository;
     protected readonly ConcurrentDictionary<string, CancellationTokenSource> _clients = new();
     private readonly ConcurrentDictionary<string, string> _clientFilters = new();
     private readonly ConcurrentDictionary<string, HashSet<string>> _processedMessageIds = new();
@@ -29,6 +32,26 @@ public class SseService : ISseService, IDisposable
     {
         _logger = logger;
         _serviceProvider = serviceProvider;
+        
+        // Initialize checkpoint repository if available
+        try
+        {
+            _checkpointRepository = serviceProvider.GetService<ICheckpointRepository>();
+            if (_checkpointRepository != null)
+            {
+                // Create indexes through repository
+                Task.Run(async () => await _checkpointRepository.CreateIndexesAsync());
+                _logger.LogInformation("Checkpoint repository initialized for client position tracking");
+            }
+            else
+            {
+                _logger.LogWarning("Checkpoint repository not available. Checkpoint tracking will be disabled.");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to initialize checkpoint repository. Checkpoint tracking will be disabled.");
+        }
         
         _logger.LogInformation("SseService initialized for distributed SSE with MongoDB outbox");
 
@@ -82,21 +105,59 @@ public class SseService : ISseService, IDisposable
     /// </summary>
     public void SendEventToAll(SseEvent sseEvent)
     {
-        // Always publish to outbox for distribution across all pods
-        Task.Run(async () =>
+        // Synchronously publish to outbox to ensure event persistence
+        // This prevents event loss if the pod crashes
+        try
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var outboxService = scope.ServiceProvider.GetRequiredService<SseOutboxService>();
+            
+            // Use GetAwaiter().GetResult() to make this synchronous
+            // This ensures the event is persisted before we return
+            var task = PublishWithRetryAsync(outboxService, sseEvent);
+            task.GetAwaiter().GetResult();
+            
+            _logger.LogDebug("Published event {EventId} to outbox for broadcast", sseEvent.Id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error publishing event to outbox after retries");
+            throw; // Propagate the exception to the caller
+        }
+    }
+    
+    /// <summary>
+    /// Publishes an event to the outbox with retry logic
+    /// </summary>
+    private async Task PublishWithRetryAsync(SseOutboxService outboxService, SseEvent sseEvent, string? targetClientId = null)
+    {
+        const int maxRetries = 3;
+        const int baseDelayMs = 100;
+        
+        for (int attempt = 0; attempt <= maxRetries; attempt++)
         {
             try
             {
-                using var scope = _serviceProvider.CreateScope();
-                var outboxService = scope.ServiceProvider.GetRequiredService<SseOutboxService>();
-                await outboxService.PublishEventAsync(sseEvent);
-                _logger.LogDebug("Published event {EventId} to outbox for broadcast", sseEvent.Id);
+                if (targetClientId != null)
+                {
+                    await outboxService.PublishEventAsync(sseEvent, targetClientId);
+                }
+                else
+                {
+                    await outboxService.PublishEventAsync(sseEvent);
+                }
+                return; // Success
             }
-            catch (Exception ex)
+            catch (Exception ex) when (attempt < maxRetries)
             {
-                _logger.LogError(ex, "Error publishing event to outbox");
+                var delay = baseDelayMs * (int)Math.Pow(2, attempt); // Exponential backoff
+                _logger.LogWarning(ex, "Failed to publish event to outbox, attempt {Attempt}. Retrying in {Delay}ms", 
+                    attempt + 1, delay);
+                await Task.Delay(delay);
             }
-        });
+        }
+        
+        throw new InvalidOperationException($"Failed to publish event to outbox after {maxRetries + 1} attempts");
     }
     
     /// <summary>
@@ -119,22 +180,24 @@ public class SseService : ISseService, IDisposable
         }
         else
         {
-            // Client is on another pod, use outbox
-            Task.Run(async () =>
+            // Client is on another pod, use outbox with synchronous write
+            try
             {
-                try
-                {
-                    using var scope = _serviceProvider.CreateScope();
-                    var outboxService = scope.ServiceProvider.GetRequiredService<SseOutboxService>();
-                    await outboxService.PublishEventAsync(sseEvent, clientId);
-                    _logger.LogDebug("Published event {EventId} to outbox for client {ClientId}", 
-                        sseEvent.Id, clientId);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error publishing event to outbox for client {ClientId}", clientId);
-                }
-            });
+                using var scope = _serviceProvider.CreateScope();
+                var outboxService = scope.ServiceProvider.GetRequiredService<SseOutboxService>();
+                
+                // Use GetAwaiter().GetResult() to make this synchronous
+                var task = PublishWithRetryAsync(outboxService, sseEvent, clientId);
+                task.GetAwaiter().GetResult();
+                
+                _logger.LogDebug("Published event {EventId} to outbox for client {ClientId}", 
+                    sseEvent.Id, clientId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error publishing event to outbox for client {ClientId} after retries", clientId);
+                throw; // Propagate the exception to the caller
+            }
         }
     }
 
@@ -192,27 +255,24 @@ public class SseService : ISseService, IDisposable
 
         try
         {
-            // Send initial connection established event
-            var initialEvent = new SseEvent
-            {
-                Id = Interlocked.Increment(ref _eventId).ToString(),
-                Event = "connected",
-                Data = JsonSerializer.Serialize(new 
-                { 
-                    clientId, 
-                    timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() 
-                })
-            };
-
-            _logger.LogInformation("Sending initial connection event to client {ClientId}", clientId);
-            yield return initialEvent;
+            // Don't send initial connection event - it bypasses sequencing
+            // The client knows it's connected when it starts receiving events
 
             // Create a linked token that will be cancelled if either the request is aborted or the client is removed
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, clientCts.Token);
 
-            // Setup a channel to receive events for this client
-            var channel = System.Threading.Channels.Channel.CreateUnbounded<SseEvent>();
-            _logger.LogInformation("Created channel for client {ClientId}", clientId);
+            // Setup a bounded channel with backpressure to prevent memory exhaustion
+            // Use Wait mode to apply backpressure instead of dropping events
+            const int channelCapacity = 10000; // Increased capacity to handle bursts
+            var channelOptions = new System.Threading.Channels.BoundedChannelOptions(channelCapacity)
+            {
+                FullMode = System.Threading.Channels.BoundedChannelFullMode.Wait, // Wait instead of drop
+                SingleReader = true,
+                SingleWriter = false
+            };
+            var channel = System.Threading.Channels.Channel.CreateBounded<SseEvent>(channelOptions);
+            _logger.LogInformation("Created bounded channel with capacity {Capacity} for client {ClientId}", 
+                channelCapacity, clientId);
 
             // Subscribe to events
             EventHandler<SseEventSentArgs> eventHandler = (sender, args) =>
@@ -238,11 +298,27 @@ public class SseService : ISseService, IDisposable
                         return;
                     }
 
-                    var success = channel.Writer.TryWrite(args.Event);
-                    if (!success)
+                    // Try to write to channel without blocking the event publisher
+                    // Fire and forget to avoid blocking the outbox processing
+                    _ = Task.Run(async () =>
                     {
-                        _logger.LogWarning("Failed to write event to channel for client {ClientId}", clientId);
-                    }
+                        try
+                        {
+                            // Use a timeout to prevent indefinite blocking
+                            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                            await channel.Writer.WriteAsync(args.Event, timeoutCts.Token);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            _logger.LogError("Timeout writing event {EventId} to client {ClientId} channel. Client may be too slow.", 
+                                args.Event.Id, clientId);
+                        }
+                        catch (InvalidOperationException ex) when (ex.Message.Contains("closed"))
+                        {
+                            _logger.LogDebug("Channel closed for client {ClientId} while writing event {EventId}", 
+                                clientId, args.Event.Id);
+                        }
+                    });
                 }
             };
 
@@ -257,6 +333,10 @@ public class SseService : ISseService, IDisposable
                     while (channel.Reader.TryRead(out var sseEvent))
                     {
                         yield return sseEvent;
+                        
+                        // Update checkpoint after successful delivery
+                        // Fire and forget to avoid blocking the stream
+                        _ = Task.Run(async () => await UpdateClientCheckpointAsync(clientId, sseEvent));
                     }
                 }
             }
@@ -270,6 +350,88 @@ public class SseService : ISseService, IDisposable
         finally
         {
             _logger.LogInformation("SSE event stream ended for client {ClientId}", clientId);
+        }
+    }
+
+    /// <summary>
+    /// Gets an async enumerable of SSE events for a specific client with checkpoint support
+    /// </summary>
+    public async IAsyncEnumerable<SseEvent> GetSseEventsAsync(
+        string clientId,
+        long? checkpoint,
+        string? lastEventId,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Starting SSE event stream for client {ClientId} with checkpoint {Checkpoint} and lastEventId {LastEventId}", 
+            clientId, checkpoint, lastEventId);
+
+        // First, check if we have a stored checkpoint for this client
+        var storedCheckpoint = await GetClientCheckpointAsync(clientId);
+        
+        // Use the provided checkpoint, or fall back to stored checkpoint
+        var effectiveCheckpoint = checkpoint ?? storedCheckpoint;
+        
+        if (effectiveCheckpoint.HasValue)
+        {
+            _logger.LogInformation("Client {ClientId} resuming from checkpoint {Checkpoint}", clientId, effectiveCheckpoint.Value);
+            
+            // Replay missed events from MongoDB outbox
+            await ReplayEventsFromCheckpoint(clientId, effectiveCheckpoint.Value, cancellationToken);
+        }
+
+        // Continue with normal event streaming
+        await foreach (var sseEvent in GetSseEventsAsync(clientId, cancellationToken))
+        {
+            yield return sseEvent;
+        }
+    }
+
+    /// <summary>
+    /// Replays events from the outbox starting from a given checkpoint
+    /// </summary>
+    private async Task ReplayEventsFromCheckpoint(string clientId, long checkpoint, CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Get the outbox repository to query for missed events
+            using var scope = _serviceProvider.CreateScope();
+            var outboxRepository = scope.ServiceProvider.GetService<IOutboxEventRepository>();
+            
+            if (outboxRepository == null)
+            {
+                _logger.LogWarning("Outbox repository not available. Cannot replay events.");
+                return;
+            }
+            
+            // Query for events with sequence number greater than checkpoint
+            var missedEvents = await outboxRepository.GetEventsAfterSequenceAsync(checkpoint, 1000, cancellationToken);
+            
+            _logger.LogInformation("Found {Count} missed events for client {ClientId} from checkpoint {Checkpoint}", 
+                missedEvents.Count, clientId, checkpoint);
+            
+            // Send each missed event to the client
+            foreach (var outboxEvent in missedEvents)
+            {
+                var sseEvent = new SseEvent
+                {
+                    Id = outboxEvent.EventId,
+                    Event = outboxEvent.EventType,
+                    Data = outboxEvent.EventData,
+                    SequenceNumber = outboxEvent.SequenceNumber
+                };
+                
+                // Send directly to this specific client
+                SendEventToClient(clientId, sseEvent);
+                
+                // Small delay to avoid overwhelming the client
+                await Task.Delay(10, cancellationToken);
+            }
+            
+            _logger.LogInformation("Completed replay of {Count} events for client {ClientId}", missedEvents.Count, clientId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to replay events from checkpoint for client {ClientId}", clientId);
         }
     }
 
@@ -336,8 +498,8 @@ public class SseService : ISseService, IDisposable
             Data = JsonSerializer.Serialize(new HeartbeatPayload())
         };
 
-        // Send heartbeat only to local clients (not through outbox)
-        SendEventToLocalClients(heartbeatEvent);
+        // Send heartbeat through outbox to ensure it gets a sequence number
+        SendEventToAll(heartbeatEvent);
     }
 
     /// <summary>
@@ -369,6 +531,91 @@ public class SseService : ISseService, IDisposable
     {
         Dispose(true);
         GC.SuppressFinalize(this);
+    }
+
+    /// <summary>
+    /// Updates the client's checkpoint after successfully delivering an event
+    /// </summary>
+    private async Task UpdateClientCheckpointAsync(string clientId, SseEvent sseEvent)
+    {
+        if (_checkpointRepository == null || !sseEvent.SequenceNumber.HasValue)
+        {
+            return;
+        }
+
+        await _checkpointRepository.UpdateCheckpointAsync(clientId, sseEvent.SequenceNumber.Value, sseEvent.Id);
+    }
+
+    /// <summary>
+    /// Gets the last checkpoint for a client
+    /// </summary>
+    public async Task<long?> GetClientCheckpointAsync(string clientId)
+    {
+        if (_checkpointRepository == null)
+        {
+            return null;
+        }
+
+        var checkpoint = await _checkpointRepository.GetCheckpointAsync(clientId);
+        return checkpoint?.LastSequenceNumber;
+    }
+
+    /// <summary>
+    /// Gets the SSE event stream for a client with filter
+    /// </summary>
+    public async IAsyncEnumerable<SseEvent> GetSseEventsAsync(
+        string clientId, 
+        string? filter, 
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        // Set the filter for the client
+        if (!string.IsNullOrEmpty(filter))
+        {
+            _clientFilters[clientId] = filter;
+        }
+
+        await foreach (var sseEvent in GetSseEventsAsync(clientId, cancellationToken))
+        {
+            yield return sseEvent;
+        }
+    }
+
+    /// <summary>
+    /// Gets the SSE event stream for a client with checkpoint support
+    /// </summary>
+    public async IAsyncEnumerable<SseEvent> GetSseEventsAsync(
+        string clientId, 
+        string? filter, 
+        long? checkpoint, 
+        string? lastEventId, 
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        // Set the filter for the client
+        if (!string.IsNullOrEmpty(filter))
+        {
+            _clientFilters[clientId] = filter;
+        }
+
+        await foreach (var sseEvent in GetSseEventsAsync(clientId, checkpoint, lastEventId, cancellationToken))
+        {
+            yield return sseEvent;
+        }
+    }
+
+    /// <summary>
+    /// Checks if a client is currently connected
+    /// </summary>
+    public bool IsClientConnected(string clientId)
+    {
+        return _clients.ContainsKey(clientId);
+    }
+
+    /// <summary>
+    /// Gets all currently connected client IDs
+    /// </summary>
+    public IEnumerable<string> GetConnectedClients()
+    {
+        return _clients.Keys.ToList();
     }
 
     protected virtual void Dispose(bool disposing)

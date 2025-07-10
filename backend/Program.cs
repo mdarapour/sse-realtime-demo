@@ -1,8 +1,11 @@
 using MongoDB.Driver;
+using SseDemo.Application.Services;
 using SseDemo.Auth;
+using SseDemo.Infrastructure.Services;
 using SseDemo.Middleware;
 using SseDemo.Outbox;
 using SseDemo.Services;
+using SseDemo.Repositories;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -51,6 +54,16 @@ var mongoConnectionString = builder.Configuration["MongoDB:ConnectionString"]
     ?? throw new InvalidOperationException("MongoDB:ConnectionString is required");
 
 builder.Services.AddSingleton<IMongoClient>(sp => new MongoClient(mongoConnectionString));
+
+// Register repositories
+builder.Services.AddSingleton<IOutboxEventRepository, OutboxEventRepository>();
+builder.Services.AddSingleton<ISequenceRepository, SequenceRepository>();
+builder.Services.AddSingleton<ICheckpointRepository, CheckpointRepository>();
+
+// Register application services
+builder.Services.AddScoped<IEventBroadcastService, EventBroadcastService>();
+builder.Services.AddScoped<IConnectionManagementService, ConnectionManagementService>();
+builder.Services.AddScoped<IEventReplayService, EventReplayService>();
 
 // Register SseService as singleton - IMPORTANT: Only register once!
 builder.Services.AddSingleton<SseService>();

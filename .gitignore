@@ -37,3 +37,8 @@ Thumbs.db
 # backend/appsettings.json
 # k8s/backend-config.yaml
 # k8s/mongodb.yaml
+
+# misc
+.cl*
+CL*
+tests/

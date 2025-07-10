@@ -13,6 +13,8 @@ public static class SseConnectionHelper
     /// </summary>
     /// <param name="clientId">Client identifier</param>
     /// <param name="filter">Optional event filter</param>
+    /// <param name="checkpoint">Optional checkpoint to resume from</param>
+    /// <param name="lastEventId">Optional last event ID to resume from</param>
     /// <param name="sseService">SSE service</param>
     /// <param name="logger">Logger</param>
     /// <param name="writeEvent">Function to write an event to the response</param>
@@ -22,13 +24,16 @@ public static class SseConnectionHelper
     public static async Task HandleSseConnectionAsync(
         string clientId,
         string? filter,
+        long? checkpoint,
+        string? lastEventId,
         ISseService sseService,
         ILogger logger,
         Func<string, CancellationToken, Task> writeEvent,
         Func<CancellationToken, Task> flushResponse,
         CancellationToken cancellationToken)
     {
-        logger.LogInformation("SSE connection requested for client {ClientId} with filter {Filter}", clientId, filter ?? "none");
+        logger.LogInformation("SSE connection requested for client {ClientId} with filter {Filter}, checkpoint {Checkpoint}, lastEventId {LastEventId}", 
+            clientId, filter ?? "none", checkpoint, lastEventId);
 
         try
         {
@@ -37,8 +42,8 @@ public static class SseConnectionHelper
 
             try
             {
-                // Stream SSE events to the client
-                await foreach (var sseEvent in sseService.GetSseEventsAsync(clientId, cancellationToken))
+                // Stream SSE events to the client, passing checkpoint info
+                await foreach (var sseEvent in sseService.GetSseEventsAsync(clientId, filter, checkpoint, lastEventId, cancellationToken))
                 {
                     var eventString = sseEvent.Format();
                     await writeEvent(eventString, cancellationToken);

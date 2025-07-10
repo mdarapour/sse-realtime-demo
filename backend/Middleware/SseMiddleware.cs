@@ -48,6 +48,8 @@ public class SseMiddleware
         await SseConnectionHelper.HandleSseConnectionAsync(
             clientId,
             filter,
+            null, // checkpoint - middleware doesn't support this, use controller endpoint instead
+            null, // lastEventId - middleware doesn't support this, use controller endpoint instead
             sseService,
             _logger,
             (eventString, token) => context.Response.WriteAsync(eventString, token),

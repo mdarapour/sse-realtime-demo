@@ -35,6 +35,9 @@ export interface UseSseReturn {
 
   /** Clear the events array */
   clearEvents: () => void;
+
+  /** SSE client instance for advanced operations */
+  sseClient: SseClient | null;
 }
 
 /**
@@ -178,6 +181,7 @@ export function useSse(options: UseSseOptions): UseSseReturn {
     connect,
     disconnect,
     clearEvents,
+    sseClient: clientRef.current,
   };
 }
 

@@ -1,9 +1,7 @@
-using MongoDB.Driver;
-using MongoDB.Bson;
 using SseDemo.Models;
 using SseDemo.Outbox.Models;
 using SseDemo.Services;
-using System.Collections.Concurrent;
+using SseDemo.Repositories;
 
 namespace SseDemo.Outbox;
 
@@ -13,82 +11,69 @@ namespace SseDemo.Outbox;
 public class SseOutboxService : BackgroundService
 {
     private readonly ILogger<SseOutboxService> _logger;
-    private readonly IMongoCollection<SseOutboxEvent> _outboxCollection;
+    private readonly IOutboxEventRepository _outboxRepository;
+    private readonly ISequenceRepository _sequenceRepository;
     private readonly SseService _sseService;
     private readonly string _instanceId;
-    private readonly IConfiguration _configuration;
-    private readonly ConcurrentDictionary<string, DateTime> _lastProcessedTimes = new();
+    private long _lastDeliveredSequence = 0;
 
     public SseOutboxService(
         ILogger<SseOutboxService> logger,
-        IMongoClient mongoClient,
-        SseService sseService,
-        IConfiguration configuration)
+        IOutboxEventRepository outboxRepository,
+        ISequenceRepository sequenceRepository,
+        SseService sseService)
     {
         _logger = logger;
+        _outboxRepository = outboxRepository;
+        _sequenceRepository = sequenceRepository;
         _sseService = sseService;
-        _configuration = configuration;
         _instanceId = $"{Environment.MachineName}-{Guid.NewGuid():N}";
         
-        var databaseName = _configuration["MongoDB:DatabaseName"] ?? "sse_outbox";
-        var collectionName = _configuration["MongoDB:OutboxCollection"] ?? "outbox_events";
-        
-        var database = mongoClient.GetDatabase(databaseName);
-        _outboxCollection = database.GetCollection<SseOutboxEvent>(collectionName);
-        
-        // Create TTL index for automatic cleanup
-        CreateIndexes();
+        // Create indexes through repositories
+        Task.Run(async () => {
+            await _outboxRepository.CreateIndexesAsync();
+            await _sequenceRepository.InitializeAsync();
+        });
     }
 
-    private void CreateIndexes()
-    {
-        try
-        {
-            // TTL index to automatically delete old events
-            var ttlIndex = Builders<SseOutboxEvent>.IndexKeys.Ascending(x => x.Ttl);
-            var ttlOptions = new CreateIndexOptions { ExpireAfter = TimeSpan.Zero };
-            _outboxCollection.Indexes.CreateOne(new CreateIndexModel<SseOutboxEvent>(ttlIndex, ttlOptions));
-            
-            // Index on CreatedAt for efficient querying
-            var createdAtIndex = Builders<SseOutboxEvent>.IndexKeys.Ascending(x => x.CreatedAt);
-            _outboxCollection.Indexes.CreateOne(new CreateIndexModel<SseOutboxEvent>(createdAtIndex));
-            
-            _logger.LogInformation("MongoDB indexes created successfully");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error creating MongoDB indexes");
-        }
-    }
 
     /// <summary>
     /// Publishes an event to the outbox
     /// </summary>
     public async Task PublishEventAsync(SseEvent sseEvent, string? targetClientId = null)
     {
+        // Generate atomic sequence number
+        var sequenceNumber = await _sequenceRepository.GetNextSequenceNumberAsync();
+        
         var outboxEvent = new SseOutboxEvent
         {
             EventId = sseEvent.Id ?? Guid.NewGuid().ToString(),
             EventType = sseEvent.Event ?? "message",
             EventData = sseEvent.Data ?? string.Empty,
             TargetClientId = targetClientId,
-            CreatedAt = DateTime.UtcNow
+            CreatedAt = DateTime.UtcNow,
+            SequenceNumber = sequenceNumber
         };
         
-        await _outboxCollection.InsertOneAsync(outboxEvent);
-        _logger.LogDebug("Published event {EventId} to outbox", outboxEvent.EventId);
+        await _outboxRepository.PublishEventAsync(outboxEvent);
+        _logger.LogDebug("Published event {EventId} with sequence {Sequence} to outbox", 
+            outboxEvent.EventId, sequenceNumber);
     }
+    
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Starting SseOutboxService on instance {InstanceId}", _instanceId);
         
+        // Get the last sequence from the database if we're restarting
+        await InitializeLastDeliveredSequence(stoppingToken);
+        
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await ProcessOutboxEvents(stoppingToken);
-                await Task.Delay(TimeSpan.FromMilliseconds(100), stoppingToken);
+                await DeliverNewEventsToLocalClients(stoppingToken);
+                await Task.Delay(TimeSpan.FromMilliseconds(50), stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -97,89 +82,80 @@ public class SseOutboxService : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing outbox events");
+                _logger.LogError(ex, "Error delivering outbox events");
                 await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
             }
         }
         
         _logger.LogInformation("Stopping SseOutboxService on instance {InstanceId}", _instanceId);
     }
-
-    private async Task ProcessOutboxEvents(CancellationToken cancellationToken)
+    
+    private async Task InitializeLastDeliveredSequence(CancellationToken cancellationToken)
     {
-        // Get the last processed time for this instance
-        var lastProcessed = _lastProcessedTimes.GetOrAdd(_instanceId, DateTime.MinValue);
-        
-        // Query for new events since last check
-        var filter = Builders<SseOutboxEvent>.Filter.And(
-            Builders<SseOutboxEvent>.Filter.Gt(x => x.CreatedAt, lastProcessed),
-            Builders<SseOutboxEvent>.Filter.Eq(x => x.ProcessedAt, null)
-        );
-        
-        var sort = Builders<SseOutboxEvent>.Sort.Ascending(x => x.CreatedAt);
-        
-        var cursor = await _outboxCollection.FindAsync(filter, new FindOptions<SseOutboxEvent>
+        try
         {
-            Sort = sort,
-            BatchSize = 100
-        }, cancellationToken);
-        
-        while (await cursor.MoveNextAsync(cancellationToken))
-        {
-            foreach (var outboxEvent in cursor.Current)
+            // Start from the latest event minus a small buffer to handle restarts
+            var latestEvent = await _outboxRepository.GetLatestEventAsync(cancellationToken);
+                
+            if (latestEvent != null)
             {
-                try
-                {
-                    await ProcessSingleEvent(outboxEvent, cancellationToken);
-                    
-                    // Update last processed time
-                    _lastProcessedTimes[_instanceId] = outboxEvent.CreatedAt;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error processing event {EventId}", outboxEvent.EventId);
-                }
+                // Start from 100 events back to ensure no events are missed on restart
+                _lastDeliveredSequence = Math.Max(0, latestEvent.SequenceNumber - 100);
+                _logger.LogInformation("Initialized delivery from sequence {Sequence} on instance {InstanceId}", 
+                    _lastDeliveredSequence, _instanceId);
             }
         }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error initializing last delivered sequence");
+        }
     }
 
-    private async Task ProcessSingleEvent(SseOutboxEvent outboxEvent, CancellationToken cancellationToken)
+    private async Task DeliverNewEventsToLocalClients(CancellationToken cancellationToken)
     {
-        _logger.LogDebug("Processing event {EventId} of type {EventType}", 
-            outboxEvent.EventId, outboxEvent.EventType);
-        
-        // Convert back to SseEvent
-        var sseEvent = new SseEvent
+        try
         {
-            Id = outboxEvent.EventId,
-            Event = outboxEvent.EventType,
-            Data = outboxEvent.EventData
-        };
-        
-        // Send to appropriate clients
-        if (string.IsNullOrEmpty(outboxEvent.TargetClientId))
-        {
-            // Broadcast to all local clients only (not back to outbox)
-            _logger.LogDebug("Delivering event {EventId} of type {EventType} to local clients", 
-                sseEvent.Id, sseEvent.Event);
-            _sseService.DeliverEventToLocalClients(sseEvent);
-        }
-        else
-        {
-            // Send to specific client if connected locally
-            _logger.LogDebug("Delivering event {EventId} of type {EventType} to client {ClientId}", 
-                sseEvent.Id, sseEvent.Event, outboxEvent.TargetClientId);
-            _sseService.SendEventToClient(outboxEvent.TargetClientId, sseEvent);
-        }
-        
-        // Mark as processed
-        var update = Builders<SseOutboxEvent>.Update
-            .Set(x => x.ProcessedAt, DateTime.UtcNow)
-            .Set(x => x.ProcessedBy, _instanceId);
+            // Query for events newer than what we've delivered to our local clients
+            var events = await _outboxRepository.GetEventsAfterSequenceAsync(_lastDeliveredSequence, 100, cancellationToken);
             
-        await _outboxCollection.UpdateOneAsync(
-            x => x.Id == outboxEvent.Id,
-            update,
-            cancellationToken: cancellationToken);
+            if (events.Count == 0)
+            {
+                return;
+            }
+            
+            foreach (var outboxEvent in events)
+            {
+                // Convert to SseEvent
+                var sseEvent = new SseEvent
+                {
+                    Id = outboxEvent.EventId,
+                    Event = outboxEvent.EventType,
+                    Data = outboxEvent.EventData,
+                    SequenceNumber = outboxEvent.SequenceNumber
+                };
+                
+                // Deliver to all local clients on this pod
+                if (string.IsNullOrEmpty(outboxEvent.TargetClientId))
+                {
+                    // Broadcast event
+                    _sseService.DeliverEventToLocalClients(sseEvent);
+                }
+                else
+                {
+                    // Targeted event - only deliver if the client is connected to this pod
+                    _sseService.SendEventToClient(outboxEvent.TargetClientId, sseEvent);
+                }
+                
+                _lastDeliveredSequence = outboxEvent.SequenceNumber;
+            }
+            
+            _logger.LogDebug("Pod {InstanceId} delivered {Count} events up to sequence {Sequence}", 
+                _instanceId, events.Count, _lastDeliveredSequence);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error querying/delivering events from outbox");
+        }
     }
+
 }

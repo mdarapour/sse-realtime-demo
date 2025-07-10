@@ -17,6 +17,12 @@ public class SseOutboxEvent
     public string EventId { get; set; } = string.Empty;
     
     /// <summary>
+    /// Global sequence number for event ordering
+    /// </summary>
+    [BsonElement("seq")]
+    public long SequenceNumber { get; set; }
+    
+    /// <summary>
     /// The event type (e.g., "message", "notification", "dataUpdate")
     /// </summary>
     public string EventType { get; set; } = string.Empty;

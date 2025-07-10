@@ -31,4 +31,24 @@ public interface ISseService
     /// Gets the SSE event stream for a client
     /// </summary>
     IAsyncEnumerable<SseEvent> GetSseEventsAsync(string clientId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Gets the SSE event stream for a client with filter
+    /// </summary>
+    IAsyncEnumerable<SseEvent> GetSseEventsAsync(string clientId, string? filter, CancellationToken cancellationToken);
+    
+    /// <summary>
+    /// Gets the SSE event stream for a client with checkpoint support
+    /// </summary>
+    IAsyncEnumerable<SseEvent> GetSseEventsAsync(string clientId, string? filter, long? checkpoint, string? lastEventId, CancellationToken cancellationToken);
+    
+    /// <summary>
+    /// Checks if a client is currently connected
+    /// </summary>
+    bool IsClientConnected(string clientId);
+    
+    /// <summary>
+    /// Gets all currently connected client IDs
+    /// </summary>
+    IEnumerable<string> GetConnectedClients();
 }

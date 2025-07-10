@@ -35,6 +35,12 @@ export interface SseOptions {
   /** Whether to automatically reconnect on error (default: true) */
   autoReconnect?: boolean;
 
+  /** Whether to use checkpoint recovery on reconnection (default: true) */
+  useCheckpoint?: boolean;
+
+  /** Storage key prefix for checkpoint data (default: 'sse-checkpoint') */
+  checkpointStorageKey?: string;
+
   /** Callback for when the connection is opened */
   onOpen?: () => void;
 
@@ -74,6 +80,8 @@ export class SseClient {
   private retryCount = 0;
   private retryTimer: number | null = null;
   private eventListeners: Map<string, ((event: MessageEvent) => void)[]> = new Map();
+  private lastSequenceNumber: number | null = null;
+  private lastEventId: string | null = null;
 
   /**
    * Creates a new SSE client
@@ -84,8 +92,15 @@ export class SseClient {
       retryTimeout: 3000,
       maxRetryAttempts: 5,
       autoReconnect: true,
+      useCheckpoint: true,
+      checkpointStorageKey: 'sse-checkpoint',
       ...options,
     };
+
+    // Load checkpoint from localStorage if available
+    if (this.options.useCheckpoint) {
+      this.loadCheckpoint();
+    }
   }
 
   /**
@@ -93,6 +108,85 @@ export class SseClient {
    */
   public getStatus(): string {
     return this.status;
+  }
+
+  /**
+   * Gets the last sequence number received
+   */
+  public getLastSequenceNumber(): number | null {
+    return this.lastSequenceNumber;
+  }
+
+  /**
+   * Gets the last event ID received
+   */
+  public getLastEventId(): string | null {
+    return this.lastEventId;
+  }
+
+  /**
+   * Loads checkpoint data from localStorage
+   */
+  private loadCheckpoint(): void {
+    try {
+      const storageKey = this.getCheckpointStorageKey();
+      const checkpointData = localStorage.getItem(storageKey);
+      
+      if (checkpointData) {
+        const checkpoint = JSON.parse(checkpointData);
+        this.lastSequenceNumber = checkpoint.sequenceNumber || null;
+        this.lastEventId = checkpoint.eventId || null;
+        console.log('Loaded checkpoint:', { sequenceNumber: this.lastSequenceNumber, eventId: this.lastEventId });
+      }
+    } catch (error) {
+      console.error('Error loading checkpoint:', error);
+    }
+  }
+
+  /**
+   * Saves checkpoint data to localStorage
+   */
+  private saveCheckpoint(): void {
+    if (!this.options.useCheckpoint) {
+      return;
+    }
+
+    try {
+      const storageKey = this.getCheckpointStorageKey();
+      const checkpointData = {
+        sequenceNumber: this.lastSequenceNumber,
+        eventId: this.lastEventId,
+        timestamp: new Date().toISOString(),
+        clientId: this.options.clientId
+      };
+      
+      localStorage.setItem(storageKey, JSON.stringify(checkpointData));
+    } catch (error) {
+      console.error('Error saving checkpoint:', error);
+    }
+  }
+
+  /**
+   * Clears checkpoint data from localStorage
+   */
+  public clearCheckpoint(): void {
+    try {
+      const storageKey = this.getCheckpointStorageKey();
+      localStorage.removeItem(storageKey);
+      this.lastSequenceNumber = null;
+      this.lastEventId = null;
+      console.log('Checkpoint cleared');
+    } catch (error) {
+      console.error('Error clearing checkpoint:', error);
+    }
+  }
+
+  /**
+   * Gets the storage key for checkpoint data
+   */
+  private getCheckpointStorageKey(): string {
+    const baseKey = this.options.checkpointStorageKey || 'sse-checkpoint';
+    return this.options.clientId ? `${baseKey}-${this.options.clientId}` : baseKey;
   }
 
   /**
@@ -132,6 +226,15 @@ export class SseClient {
       params.append('apikey', this.options.apiKey);
     }
 
+    // Add checkpoint parameters if available and checkpoint is enabled
+    if (this.options.useCheckpoint && this.lastSequenceNumber !== null) {
+      params.append('checkpoint', this.lastSequenceNumber.toString());
+      console.log('Adding checkpoint to URL:', this.lastSequenceNumber);
+    } else if (this.options.useCheckpoint && this.lastEventId) {
+      params.append('lastEventId', this.lastEventId);
+      console.log('Adding lastEventId to URL:', this.lastEventId);
+    }
+
     if (params.toString()) {
       url += `?${params.toString()}`;
     }
@@ -159,6 +262,13 @@ export class SseClient {
           console.log('Setting up generic message handler');
           this.setupEventListener('message', (event) => {
             console.log('Received generic message event:', event);
+            
+            // Update last event ID and extract sequence number
+            if (event.lastEventId) {
+              this.lastEventId = event.lastEventId;
+            }
+            this.extractAndUpdateSequenceNumber(event.data);
+            
             try {
               const data = JSON.parse(event.data);
               console.log('Parsed message data:', data);
@@ -177,6 +287,13 @@ export class SseClient {
           console.log(`Adding listener for event type: ${eventType}`);
           this.setupEventListener(eventType, (event) => {
             console.log(`Received ${eventType} event:`, event);
+            
+            // Update last event ID and extract sequence number
+            if (event.lastEventId) {
+              this.lastEventId = event.lastEventId;
+            }
+            this.extractAndUpdateSequenceNumber(event.data);
+            
             if (this.options.onEvent && this.options.onEvent[eventType]) {
               try {
                 const data = JSON.parse(event.data);
@@ -203,6 +320,13 @@ export class SseClient {
         eventTypes.forEach(eventType => {
           this.setupEventListener(eventType, (event) => {
             console.log(`Received ${eventType} event:`, event);
+            
+            // Update last event ID and extract sequence number
+            if (event.lastEventId) {
+              this.lastEventId = event.lastEventId;
+            }
+            this.extractAndUpdateSequenceNumber(event.data);
+            
             if (this.options.onMessage) {
               const sseEvent: SseEvent = {
                 id: event.lastEventId,
@@ -350,6 +474,14 @@ export class SseClient {
   private handleMessage(event: MessageEvent): void {
     console.log('SSE message received:', event);
 
+    // Update last event ID
+    if (event.lastEventId) {
+      this.lastEventId = event.lastEventId;
+    }
+
+    // Try to extract sequence number from the data
+    this.extractAndUpdateSequenceNumber(event.data);
+
     if (this.options.onMessage) {
       const sseEvent: SseEvent = {
         id: event.lastEventId,
@@ -361,6 +493,25 @@ export class SseClient {
       this.options.onMessage(sseEvent);
     } else {
       console.warn('No message handler defined');
+    }
+  }
+
+  /**
+   * Extracts sequence number from event data and updates checkpoint
+   */
+  private extractAndUpdateSequenceNumber(data: string): void {
+    try {
+      const parsedData = JSON.parse(data);
+      if (parsedData._sequence !== undefined) {
+        this.lastSequenceNumber = parsedData._sequence;
+        console.log('Updated sequence number:', this.lastSequenceNumber);
+        
+        // Save checkpoint after updating sequence number
+        this.saveCheckpoint();
+      }
+    } catch {
+      // Data might not be JSON or might not contain sequence number
+      // This is fine, not all events may have sequence numbers
     }
   }
 
